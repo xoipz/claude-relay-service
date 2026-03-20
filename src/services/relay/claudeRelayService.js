@@ -44,16 +44,10 @@ class ClaudeRelayService {
   }
 
   // 🔧 根据模型ID和客户端传递的 anthropic-beta 获取最终的 header
+  // 以客户端的 anthropic-beta 为基础，尊重客户端配置（如 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS）
+  // 仅确保 oauth-2025-04-20 始终存在（中转服务 OAuth 机制必需）
   _getBetaHeader(modelId, clientBetaHeader) {
     const OAUTH_BETA = 'oauth-2025-04-20'
-    const CLAUDE_CODE_BETA = 'claude-code-20250219'
-    const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
-    const TOOL_STREAMING_BETA = 'fine-grained-tool-streaming-2025-05-14'
-
-    const isHaikuModel = modelId && modelId.toLowerCase().includes('haiku')
-    const baseBetas = isHaikuModel
-      ? [OAUTH_BETA, INTERLEAVED_THINKING_BETA]
-      : [CLAUDE_CODE_BETA, OAUTH_BETA, INTERLEAVED_THINKING_BETA, TOOL_STREAMING_BETA]
 
     const betaList = []
     const seen = new Set()
@@ -65,8 +59,7 @@ class ClaudeRelayService {
       betaList.push(beta)
     }
 
-    baseBetas.forEach(addBeta)
-
+    // 先添加客户端传递的 beta（尊重客户端的实验性功能开关）
     if (clientBetaHeader) {
       clientBetaHeader
         .split(',')
@@ -74,6 +67,9 @@ class ClaudeRelayService {
         .filter(Boolean)
         .forEach(addBeta)
     }
+
+    // 确保 OAuth beta 始终存在（中转服务基础设施需要，非实验性功能）
+    addBeta(OAUTH_BETA)
 
     return betaList.join(',')
   }
