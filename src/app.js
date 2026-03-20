@@ -198,7 +198,9 @@ class Application {
         compression({
           filter: (req, res) => {
             // 不压缩 Server-Sent Events
-            if (res.getHeader('Content-Type') === 'text/event-stream') {
+            // 使用 startsWith 匹配，避免 Content-Type 包含 charset 等参数时匹配失败
+            const contentType = res.getHeader('Content-Type')
+            if (typeof contentType === 'string' && contentType.startsWith('text/event-stream')) {
               return false
             }
             // 使用默认的压缩判断

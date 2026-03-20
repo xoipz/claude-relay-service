@@ -599,10 +599,12 @@ class CcrRelayService {
           'Content-Type': 'application/json',
           'anthropic-version': '2023-06-01',
           'User-Agent': userAgent,
+          'Accept-Encoding': 'identity',
           ...filteredHeaders
         },
         timeout: config.requestTimeout || 600000,
         responseType: 'stream',
+        decompress: false,
         validateStatus: () => true // 接受所有状态码
       }
 
