@@ -215,6 +215,13 @@ class ClaudeConsoleRelayService {
         clientHeaders?.['User-Agent'] ||
         this.defaultUserAgent
 
+      // 记录客户端的 anthropic-version
+      const clientAnthropicVersion =
+        clientHeaders?.['anthropic-version'] ||
+        clientHeaders?.['Anthropic-Version'] ||
+        clientHeaders?.['ANTHROPIC-VERSION']
+      logger.info(`📋 Client anthropic-version: ${clientAnthropicVersion || '(not provided)'}`)
+
       // 准备请求配置
       const requestConfig = {
         method: 'POST',
@@ -222,13 +229,21 @@ class ClaudeConsoleRelayService {
         data: modifiedRequestBody,
         headers: {
           'Content-Type': 'application/json',
-          'anthropic-version': '2023-06-01',
           'User-Agent': userAgent,
           ...filteredHeaders
         },
         timeout: config.requestTimeout || 600000,
         signal: abortController.signal,
         validateStatus: () => true // 接受所有状态码
+      }
+
+      // 如果客户端没有提供 anthropic-version，使用默认值
+      if (
+        !requestConfig.headers['anthropic-version'] &&
+        !requestConfig.headers['Anthropic-Version']
+      ) {
+        requestConfig.headers['anthropic-version'] = '2023-06-01'
+        logger.debug('Using default anthropic-version: 2023-06-01')
       }
 
       if (proxyAgent) {
@@ -773,6 +788,15 @@ class ClaudeConsoleRelayService {
         clientHeaders?.['User-Agent'] ||
         this.defaultUserAgent
 
+      // 记录客户端的 anthropic-version
+      const clientAnthropicVersion =
+        clientHeaders?.['anthropic-version'] ||
+        clientHeaders?.['Anthropic-Version'] ||
+        clientHeaders?.['ANTHROPIC-VERSION']
+      logger.info(
+        `📋 [Stream] Client anthropic-version: ${clientAnthropicVersion || '(not provided)'}`
+      )
+
       // 准备请求配置
       const requestConfig = {
         method: 'POST',
@@ -780,7 +804,6 @@ class ClaudeConsoleRelayService {
         data: body,
         headers: {
           'Content-Type': 'application/json',
-          'anthropic-version': '2023-06-01',
           'User-Agent': userAgent,
           'Accept-Encoding': 'identity',
           ...filteredHeaders
@@ -789,6 +812,15 @@ class ClaudeConsoleRelayService {
         responseType: 'stream',
         decompress: false,
         validateStatus: () => true // 接受所有状态码
+      }
+
+      // 如果客户端没有提供 anthropic-version，使用默认值
+      if (
+        !requestConfig.headers['anthropic-version'] &&
+        !requestConfig.headers['Anthropic-Version']
+      ) {
+        requestConfig.headers['anthropic-version'] = '2023-06-01'
+        logger.debug('[Stream] Using default anthropic-version: 2023-06-01')
       }
 
       if (proxyAgent) {

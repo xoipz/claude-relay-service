@@ -345,6 +345,7 @@ export const updateAdminServiceRatesApi = (data, config) =>
 
 // 系统
 export const checkUpdatesApi = () => request({ url: '/admin/check-updates', method: 'GET' })
+export const performUpdateApi = () => request({ url: '/admin/perform-update', method: 'POST' })
 export const getClaudeCodeVersionApi = () =>
   request({ url: '/admin/claude-code-version', method: 'GET' })
 export const clearClaudeCodeVersionApi = () =>

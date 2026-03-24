@@ -1,13 +1,17 @@
 const express = require('express')
 const fs = require('fs')
 const path = require('path')
-const axios = require('axios')
+const { execFile } = require('child_process')
+const { promisify } = require('util')
 const claudeCodeHeadersService = require('../../services/claudeCodeHeadersService')
 const claudeAccountService = require('../../services/account/claudeAccountService')
 const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const config = require('../../../config/config')
+
+const execFileAsync = promisify(execFile)
+const PROJECT_ROOT = path.join(__dirname, '..', '..', '..')
 
 const router = express.Router()
 
@@ -65,7 +69,17 @@ router.delete('/claude-code-headers/:accountId', authenticateAdmin, async (req, 
   }
 })
 
-// ==================== 系统更新检查 ====================
+// ==================== 系统更新检查（基于 Git） ====================
+
+// 执行 git 命令的辅助函数
+async function runGit(...args) {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd: PROJECT_ROOT,
+    timeout: 30000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  })
+  return stdout.trim()
+}
 
 // 版本比较函数
 function compareVersions(current, latest) {
@@ -92,7 +106,7 @@ function compareVersions(current, latest) {
 
 router.get('/check-updates', authenticateAdmin, async (req, res) => {
   // 读取当前版本
-  const versionPath = path.join(__dirname, '../../../VERSION')
+  const versionPath = path.join(PROJECT_ROOT, 'VERSION')
   let currentVersion = '1.0.0'
   try {
     currentVersion = fs.readFileSync(versionPath, 'utf8').trim()
@@ -111,7 +125,6 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
 
       // 缓存有效期1小时
       if (cacheAge < 3600000) {
-        // 实时计算 hasUpdate，不使用缓存的值
         const hasUpdate = compareVersions(currentVersion, cachedData.latest) < 0
 
         return res.json({
@@ -119,7 +132,7 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
           data: {
             current: currentVersion,
             latest: cachedData.latest,
-            hasUpdate, // 实时计算，不用缓存
+            hasUpdate,
             releaseInfo: cachedData.releaseInfo,
             cached: true
           }
@@ -127,30 +140,62 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
       }
     }
 
-    // 请求 GitHub API
-    const githubRepo = 'wei-shaw/claude-relay-service'
-    const response = await axios.get(`https://api.github.com/repos/${githubRepo}/releases/latest`, {
-      headers: {
-        Accept: 'application/vnd.github.v3+json',
-        'User-Agent': 'Claude-Relay-Service'
-      },
-      timeout: 10000
-    })
+    // 获取当前分支
+    const currentBranch = await runGit('rev-parse', '--abbrev-ref', 'HEAD')
 
-    const release = response.data
-    const latestVersion = release.tag_name.replace(/^v/, '')
+    // 从远端获取最新信息
+    await runGit('fetch', 'origin', currentBranch)
 
-    // 比较版本
-    const hasUpdate = compareVersions(currentVersion, latestVersion) < 0
+    // 获取本地和远端的 commit hash
+    const localHash = await runGit('rev-parse', 'HEAD')
+    const remoteHash = await runGit('rev-parse', `origin/${currentBranch}`)
 
-    const releaseInfo = {
-      name: release.name,
-      body: release.body,
-      publishedAt: release.published_at,
-      htmlUrl: release.html_url
+    // 读取远端 VERSION 文件内容
+    let latestVersion = currentVersion
+    try {
+      latestVersion = await runGit('show', `origin/${currentBranch}:VERSION`)
+      latestVersion = latestVersion.trim()
+    } catch {
+      // 远端没有 VERSION 文件时使用当前版本
     }
 
-    // 缓存结果（不缓存 hasUpdate，因为它应该实时计算）
+    const hasUpdate = localHash !== remoteHash && compareVersions(currentVersion, latestVersion) < 0
+
+    // 获取待更新的 commit 列表（最多显示 20 条）
+    let pendingCommits = []
+    if (localHash !== remoteHash) {
+      try {
+        const logOutput = await runGit(
+          'log',
+          '--oneline',
+          '--format=%H|%s|%ai',
+          '-20',
+          `${localHash}..origin/${currentBranch}`
+        )
+        if (logOutput) {
+          pendingCommits = logOutput.split('\n').map((line) => {
+            const [hash, subject, date] = line.split('|')
+            return { hash: hash.slice(0, 8), subject, date }
+          })
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const releaseInfo = {
+      name: latestVersion !== currentVersion ? `v${latestVersion}` : null,
+      body: pendingCommits.length
+        ? `${pendingCommits.length} 个新提交待更新:\n${pendingCommits.map((c) => `• ${c.subject}`).join('\n')}`
+        : '已是最新',
+      publishedAt: pendingCommits.length ? pendingCommits[0].date : new Date().toISOString(),
+      localHash: localHash.slice(0, 8),
+      remoteHash: remoteHash.slice(0, 8),
+      branch: currentBranch,
+      pendingCommits
+    }
+
+    // 缓存结果
     await redis.getClient().set(
       cacheKey,
       JSON.stringify({
@@ -160,7 +205,7 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
       }),
       'EX',
       3600
-    ) // 1小时过期
+    )
 
     return res.json({
       success: true,
@@ -173,66 +218,29 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
       }
     })
   } catch (error) {
-    // 改进错误日志记录
-    const errorDetails = {
-      message: error.message || 'Unknown error',
-      code: error.code,
-      response: error.response
-        ? {
-            status: error.response.status,
-            statusText: error.response.statusText,
-            data: error.response.data
-          }
-        : null,
-      request: error.request ? 'Request was made but no response received' : null
-    }
+    logger.error('❌ Failed to check for updates:', error.message)
 
-    logger.error('❌ Failed to check for updates:', errorDetails.message)
+    // 网络错误时尝试返回缓存
+    const cacheKey = 'version_check_cache'
+    const cached = await redis.getClient().get(cacheKey)
 
-    // 处理 404 错误 - 仓库或版本不存在
-    if (error.response && error.response.status === 404) {
+    if (cached) {
+      const cachedData = JSON.parse(cached)
+      const hasUpdate = compareVersions(currentVersion, cachedData.latest) < 0
+
       return res.json({
         success: true,
         data: {
           current: currentVersion,
-          latest: currentVersion,
-          hasUpdate: false,
-          releaseInfo: {
-            name: 'No releases found',
-            body: 'The GitHub repository has no releases yet.',
-            publishedAt: new Date().toISOString(),
-            htmlUrl: '#'
-          },
-          warning: 'GitHub repository has no releases'
+          latest: cachedData.latest,
+          hasUpdate,
+          releaseInfo: cachedData.releaseInfo,
+          cached: true,
+          warning: 'Using cached data due to git error'
         }
       })
     }
 
-    // 如果是网络错误，尝试返回缓存的数据
-    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND') {
-      const cacheKey = 'version_check_cache'
-      const cached = await redis.getClient().get(cacheKey)
-
-      if (cached) {
-        const cachedData = JSON.parse(cached)
-        // 实时计算 hasUpdate
-        const hasUpdate = compareVersions(currentVersion, cachedData.latest) < 0
-
-        return res.json({
-          success: true,
-          data: {
-            current: currentVersion,
-            latest: cachedData.latest,
-            hasUpdate, // 实时计算
-            releaseInfo: cachedData.releaseInfo,
-            cached: true,
-            warning: 'Using cached data due to network error'
-          }
-        })
-      }
-    }
-
-    // 其他错误返回当前版本信息
     return res.json({
       success: true,
       data: {
@@ -241,13 +249,89 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
         hasUpdate: false,
         releaseInfo: {
           name: 'Update check failed',
-          body: `Unable to check for updates: ${error.message || 'Unknown error'}`,
-          publishedAt: new Date().toISOString(),
-          htmlUrl: '#'
+          body: `无法检查更新: ${error.message || 'Unknown error'}`,
+          publishedAt: new Date().toISOString()
         },
         error: true,
         warning: error.message || 'Failed to check for updates'
       }
+    })
+  }
+})
+
+// 执行更新（git pull + npm install）
+router.post('/perform-update', authenticateAdmin, async (req, res) => {
+  try {
+    const currentBranch = await runGit('rev-parse', '--abbrev-ref', 'HEAD')
+    const beforeHash = await runGit('rev-parse', 'HEAD')
+
+    // 读取更新前版本
+    const versionPath = path.join(PROJECT_ROOT, 'VERSION')
+    let beforeVersion = '1.0.0'
+    try {
+      beforeVersion = fs.readFileSync(versionPath, 'utf8').trim()
+    } catch {
+      // ignore
+    }
+
+    // 执行 git pull
+    const pullOutput = await runGit('pull', 'origin', currentBranch)
+
+    const afterHash = await runGit('rev-parse', 'HEAD')
+
+    // 读取更新后版本
+    let afterVersion = beforeVersion
+    try {
+      afterVersion = fs.readFileSync(versionPath, 'utf8').trim()
+    } catch {
+      // ignore
+    }
+
+    const updated = beforeHash !== afterHash
+
+    // 如果有更新，执行 npm install
+    let npmOutput = ''
+    if (updated) {
+      try {
+        const { stdout } = await execFileAsync('npm', ['install', '--omit=dev'], {
+          cwd: PROJECT_ROOT,
+          timeout: 120000,
+          env: process.env,
+          shell: true
+        })
+        npmOutput = stdout.trim()
+      } catch (npmErr) {
+        logger.warn('⚠️ npm install warning:', npmErr.message)
+        npmOutput = `npm install completed with warnings: ${npmErr.message}`
+      }
+
+      // 清除版本检查缓存
+      await redis.getClient().del('version_check_cache')
+    }
+
+    logger.info(
+      `✅ System update ${updated ? 'completed' : 'no changes'}: ${beforeHash.slice(0, 8)} → ${afterHash.slice(0, 8)}`
+    )
+
+    return res.json({
+      success: true,
+      data: {
+        updated,
+        beforeVersion,
+        afterVersion,
+        beforeHash: beforeHash.slice(0, 8),
+        afterHash: afterHash.slice(0, 8),
+        branch: currentBranch,
+        pullOutput,
+        npmOutput: npmOutput ? npmOutput.slice(0, 500) : '',
+        needRestart: updated
+      }
+    })
+  } catch (error) {
+    logger.error('❌ Failed to perform update:', error.message)
+    return res.status(500).json({
+      success: false,
+      message: `更新失败: ${error.message}`
     })
   }
 })

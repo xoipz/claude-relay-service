@@ -22,16 +22,19 @@
                 >v{{ versionInfo.current || '...' }}</span
               >
               <!-- 更新提示 -->
-              <a
+              <button
                 v-if="versionInfo.hasUpdate"
-                class="inline-flex animate-pulse items-center gap-1 rounded-full border border-green-600 bg-green-500 px-2 py-0.5 text-xs text-white transition-colors hover:bg-green-600"
-                :href="versionInfo.releaseInfo?.htmlUrl || '#'"
-                target="_blank"
-                title="有新版本可用"
+                class="inline-flex animate-pulse items-center gap-1 rounded-full border border-green-600 bg-green-500 px-2 py-0.5 text-xs text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="versionInfo.updating"
+                title="点击执行更新"
+                @click.stop="performUpdate"
               >
-                <i class="fas fa-arrow-up text-[10px]" />
-                <span>新版本</span>
-              </a>
+                <i
+                  :class="versionInfo.updating ? 'fas fa-spinner fa-spin' : 'fas fa-arrow-up'"
+                  class="text-[10px]"
+                />
+                <span>{{ versionInfo.updating ? '更新中...' : '新版本' }}</span>
+              </button>
             </div>
           </template>
         </LogoTitle>
@@ -86,13 +89,52 @@
                     >v{{ versionInfo.latest }}</span
                   >
                 </div>
-                <a
-                  class="block w-full rounded-lg bg-green-500 px-3 py-1.5 text-center text-sm text-white transition-colors hover:bg-green-600"
-                  :href="versionInfo.releaseInfo?.htmlUrl || '#'"
-                  target="_blank"
+                <!-- 待更新 commit 列表 -->
+                <div
+                  v-if="versionInfo.releaseInfo?.pendingCommits?.length"
+                  class="mb-2 max-h-28 overflow-y-auto rounded-lg bg-gray-50 p-2 text-xs dark:bg-gray-700/50"
                 >
-                  <i class="fas fa-external-link-alt mr-1" />查看更新
-                </a>
+                  <div
+                    v-for="commit in versionInfo.releaseInfo.pendingCommits.slice(0, 5)"
+                    :key="commit.hash"
+                    class="mb-1 truncate text-gray-600 dark:text-gray-400"
+                  >
+                    <span class="font-mono text-blue-500 dark:text-blue-400">{{
+                      commit.hash
+                    }}</span>
+                    {{ commit.subject }}
+                  </div>
+                  <div
+                    v-if="versionInfo.releaseInfo.pendingCommits.length > 5"
+                    class="text-gray-400 dark:text-gray-500"
+                  >
+                    ... 还有 {{ versionInfo.releaseInfo.pendingCommits.length - 5 }} 个提交
+                  </div>
+                </div>
+                <button
+                  class="block w-full rounded-lg bg-green-500 px-3 py-1.5 text-center text-sm text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  :disabled="versionInfo.updating"
+                  @click="performUpdate"
+                >
+                  <i
+                    :class="
+                      versionInfo.updating ? 'fas fa-spinner fa-spin mr-1' : 'fas fa-download mr-1'
+                    "
+                  />
+                  {{ versionInfo.updating ? '正在更新...' : '执行更新' }}
+                </button>
+                <!-- 更新结果 -->
+                <div
+                  v-if="versionInfo.updateResult"
+                  class="mt-2 rounded-lg p-2 text-xs"
+                  :class="
+                    versionInfo.updateResult.success
+                      ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                      : 'bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                  "
+                >
+                  {{ versionInfo.updateResult.message }}
+                </div>
               </div>
               <div
                 v-else-if="versionInfo.checkingUpdate"
@@ -292,7 +334,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { showToast } from '@/utils/tools'
 
-import { checkUpdatesApi, changePasswordApi } from '@/utils/http_apis'
+import { checkUpdatesApi, performUpdateApi, changePasswordApi } from '@/utils/http_apis'
 import LogoTitle from '@/components/common/LogoTitle.vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import ConfirmModal from '@/components/common/ConfirmModal.vue'
@@ -313,6 +355,8 @@ const versionInfo = ref({
   latest: '',
   hasUpdate: false,
   checkingUpdate: false,
+  updating: false,
+  updateResult: null,
   lastChecked: null,
   releaseInfo: null,
   noUpdateMessage: false
@@ -421,6 +465,49 @@ const checkForUpdates = async () => {
     }
   } finally {
     versionInfo.value.checkingUpdate = false
+  }
+}
+
+// 执行更新（git pull + npm install）
+const performUpdate = async () => {
+  if (versionInfo.value.updating) return
+
+  versionInfo.value.updating = true
+  versionInfo.value.updateResult = null
+
+  try {
+    const result = await performUpdateApi()
+
+    if (result.success) {
+      const data = result.data
+      if (data.updated) {
+        versionInfo.value.updateResult = {
+          success: true,
+          message: `更新成功: v${data.beforeVersion} → v${data.afterVersion}，请重启服务生效`
+        }
+        versionInfo.value.current = data.afterVersion
+        versionInfo.value.hasUpdate = false
+        // 清除本地缓存
+        localStorage.removeItem('versionInfo')
+      } else {
+        versionInfo.value.updateResult = {
+          success: true,
+          message: '已是最新版本，无需更新'
+        }
+      }
+    } else {
+      versionInfo.value.updateResult = {
+        success: false,
+        message: result.message || '更新失败'
+      }
+    }
+  } catch (error) {
+    versionInfo.value.updateResult = {
+      success: false,
+      message: `更新失败: ${error.message || '未知错误'}`
+    }
+  } finally {
+    versionInfo.value.updating = false
   }
 }
 
